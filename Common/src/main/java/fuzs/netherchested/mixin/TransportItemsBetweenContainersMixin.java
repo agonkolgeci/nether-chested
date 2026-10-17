@@ -80,9 +80,12 @@ abstract class TransportItemsBetweenContainersMixin {
     }
 
     /**
-     * Replaces the vanilla target search with a line-for-line copy of it that additionally accepts nether chests, so
-     * that both chest types compete for being the nearest target within a single pass, and every check a nether chest
-     * has to pass is the very check a vanilla chest has to pass.
+     * Replaces the vanilla target search with a copy of it that additionally accepts nether chests, so that every
+     * check a nether chest has to pass is the very check a vanilla chest has to pass.
+     * <p>
+     * The one deliberate departure from vanilla: a nether chest wins over a vanilla chest no matter which one is
+     * closer, as the nether chest is meant to be the actual storage a copper golem feeds. Distance only decides
+     * between chests of the same kind, exactly like vanilla does.
      * <p>
      * This only ever runs for a mob that already carries an item and whose behavior accepts vanilla chests as a
      * drop-off target, leaving the vanilla search untouched for everyone else.
@@ -106,14 +109,17 @@ abstract class TransportItemsBetweenContainersMixin {
                 Math.floorDiv(this.getHorizontalSearchDistance(pathfinderMob), 16) + 1).toList();
         TransportItemsBetweenContainers.TransportItemTarget nearestTarget = null;
         double nearestDistance = Float.MAX_VALUE;
+        TransportItemsBetweenContainers.TransportItemTarget nearestNetherChestTarget = null;
+        double nearestNetherChestDistance = Float.MAX_VALUE;
 
         for (ChunkPos chunkPos : chunkPositions) {
             LevelChunk levelChunk = serverLevel.getChunkSource().getChunkNow(chunkPos.x, chunkPos.z);
             if (levelChunk != null) {
                 for (BlockEntity blockEntity : levelChunk.getBlockEntities().values()) {
-                    if (blockEntity instanceof ChestBlockEntity || blockEntity instanceof NetherChestBlockEntity) {
+                    boolean isNetherChest = blockEntity instanceof NetherChestBlockEntity;
+                    if (blockEntity instanceof ChestBlockEntity || isNetherChest) {
                         double distance = blockEntity.getBlockPos().distToCenterSqr(pathfinderMob.position());
-                        if (distance < nearestDistance) {
+                        if (distance < (isNetherChest ? nearestNetherChestDistance : nearestDistance)) {
                             TransportItemsBetweenContainers.TransportItemTarget target = this.isTargetValidToPick(
                                     pathfinderMob,
                                     serverLevel,
@@ -122,8 +128,13 @@ abstract class TransportItemsBetweenContainersMixin {
                                     unreachablePositions,
                                     searchArea);
                             if (target != null) {
-                                nearestTarget = target;
-                                nearestDistance = distance;
+                                if (isNetherChest) {
+                                    nearestNetherChestTarget = target;
+                                    nearestNetherChestDistance = distance;
+                                } else {
+                                    nearestTarget = target;
+                                    nearestDistance = distance;
+                                }
                             }
                         }
                     }
@@ -131,7 +142,7 @@ abstract class TransportItemsBetweenContainersMixin {
             }
         }
 
-        return Optional.ofNullable(nearestTarget);
+        return Optional.ofNullable(nearestNetherChestTarget != null ? nearestNetherChestTarget : nearestTarget);
     }
 
     /**

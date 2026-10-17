@@ -34,6 +34,8 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.storage.ValueInput;
 import net.minecraft.world.level.storage.ValueOutput;
 
+import java.util.List;
+
 /**
  * Mostly a reimplementation of vanilla's {@link net.minecraft.world.level.block.entity.ChestBlockEntity}, which does
  * not implement {@link net.minecraft.world.Container} to be able to handle item transfers ourselves on Fabric.
@@ -183,6 +185,19 @@ public class NetherChestBlockEntity extends NamedBlockEntity implements LidBlock
                         NetherChestBlockEntity.this.getBlockPos(),
                         NetherChestBlockEntity.this.getBlockState());
             }
+        }
+
+        /**
+         * Just like {@link net.minecraft.world.level.block.entity.ChestBlockEntity#getEntitiesWithContainerOpen()}.
+         * Without this the default empty list is handed out, so no mob ever shows up as using the chest: copper golems
+         * never queue up for it, and the one they open is never closed again as
+         * {@link net.minecraft.world.entity.animal.coppergolem.CopperGolemAi} only calls
+         * {@link #stopOpen(ContainerUser)} for a mob it finds in here.
+         */
+        @Override
+        public List<ContainerUser> getEntitiesWithContainerOpen() {
+            return NetherChestBlockEntity.this.openersCounter.getEntitiesWithContainerOpen(NetherChestBlockEntity.this.getLevel(),
+                    NetherChestBlockEntity.this.getBlockPos());
         }
 
         @Override
