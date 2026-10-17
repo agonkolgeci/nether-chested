@@ -8,7 +8,6 @@ import fuzs.netherchested.init.ModRegistry;
 import fuzs.netherchested.world.level.block.entity.NamedBlockEntity;
 import fuzs.netherchested.world.level.block.entity.NetherChestBlockEntity;
 import net.minecraft.core.GlobalPos;
-import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.Container;
 import net.minecraft.world.entity.PathfinderMob;
@@ -22,7 +21,6 @@ import net.minecraft.world.level.block.entity.ChestBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.phys.AABB;
-import net.minecraft.world.phys.Vec3;
 import org.jetbrains.annotations.Nullable;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
@@ -32,6 +30,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Predicate;
@@ -44,8 +43,8 @@ import java.util.function.Predicate;
  * {@link ChestBlockEntity} instances, and the destination predicate tests for
  * {@link net.minecraft.world.level.block.Blocks#CHEST} and
  * {@link net.minecraft.world.level.block.Blocks#TRAPPED_CHEST} directly. On top of that, item insertion caps every
- * slot at the item's own max stack size, ignoring the nether chest's multiplier. Everything else (reachability, queuing,
- * opening the lid, moving the items) is container agnostic and works as-is, provided
+ * slot at the item's own max stack size, ignoring the nether chest's multiplier. Everything else (reachability,
+ * queuing, opening the lid, moving the items) is container agnostic and works as-is, provided
  * {@link TransportItemTargetMixin} manages to hand out the container.
  */
 @Mixin(TransportItemsBetweenContainers.class)
@@ -80,74 +79,59 @@ abstract class TransportItemsBetweenContainersMixin {
         throw new AssertionError();
     }
 
-    @Inject(method = "getTransportTarget", at = @At("RETURN"), cancellable = true)
+    /**
+     * Replaces the vanilla target search with a line-for-line copy of it that additionally accepts nether chests, so
+     * that both chest types compete for being the nearest target within a single pass, and every check a nether chest
+     * has to pass is the very check a vanilla chest has to pass.
+     * <p>
+     * This only ever runs for a mob that already carries an item and whose behavior accepts vanilla chests as a
+     * drop-off target, leaving the vanilla search untouched for everyone else.
+     */
+    @Inject(method = "getTransportTarget", at = @At("HEAD"), cancellable = true)
     public void getTransportTarget(ServerLevel serverLevel, PathfinderMob pathfinderMob, CallbackInfoReturnable<Optional<TransportItemsBetweenContainers.TransportItemTarget>> callback) {
         if (this.isNetherChestWanted(pathfinderMob)) {
-            TransportItemsBetweenContainers.TransportItemTarget target = callback.getReturnValue().orElse(null);
-            TransportItemsBetweenContainers.TransportItemTarget nearestTarget = this.findNearerNetherChest(serverLevel,
-                    pathfinderMob,
-                    target);
-            if (nearestTarget != target) {
-                callback.setReturnValue(Optional.of(nearestTarget));
-            }
+            callback.setReturnValue(this.findTransportTarget(serverLevel, pathfinderMob));
         }
     }
 
     /**
-     * Runs the vanilla chunk scan a second time, this time for nether chests, and returns whichever of the two targets
-     * is closer to the mob.
-     * <p>
-     * This only ever runs right after the vanilla scan has run, which happens once per target acquisition and never
-     * every tick: the behavior requires an absent cooldown memory, and sets that memory to 140 ticks whenever no
-     * target is found at all. The distance comparison runs before the expensive validation, so a nether chest that
-     * cannot win costs a single comparison.
+     * @see TransportItemsBetweenContainers#getTransportTarget(ServerLevel, PathfinderMob)
      */
     @Unique
-    @Nullable
-    private TransportItemsBetweenContainers.TransportItemTarget findNearerNetherChest(ServerLevel serverLevel, PathfinderMob pathfinderMob, @Nullable TransportItemsBetweenContainers.TransportItemTarget nearestTarget) {
-        Vec3 mobPosition = pathfinderMob.position();
-        double nearestDistance = nearestTarget != null ?
-                nearestTarget.pos().distToCenterSqr(mobPosition) :
-                Double.MAX_VALUE;
+    private Optional<TransportItemsBetweenContainers.TransportItemTarget> findTransportTarget(ServerLevel serverLevel, PathfinderMob pathfinderMob) {
         AABB searchArea = this.getTargetSearchArea(pathfinderMob);
         Set<GlobalPos> visitedPositions = getVisitedPositions(pathfinderMob);
         Set<GlobalPos> unreachablePositions = getUnreachablePositions(pathfinderMob);
-        ServerChunkCache chunkSource = serverLevel.getChunkSource();
-        ChunkPos centerChunkPos = new ChunkPos(pathfinderMob.blockPosition());
-        int chunkRadius = Math.floorDiv(this.getHorizontalSearchDistance(pathfinderMob), 16) + 1;
+        List<ChunkPos> chunkPositions = ChunkPos.rangeClosed(new ChunkPos(pathfinderMob.blockPosition()),
+                Math.floorDiv(this.getHorizontalSearchDistance(pathfinderMob), 16) + 1).toList();
+        TransportItemsBetweenContainers.TransportItemTarget nearestTarget = null;
+        double nearestDistance = Float.MAX_VALUE;
 
-        for (int chunkX = centerChunkPos.x - chunkRadius; chunkX <= centerChunkPos.x + chunkRadius; chunkX++) {
-            for (int chunkZ = centerChunkPos.z - chunkRadius; chunkZ <= centerChunkPos.z + chunkRadius; chunkZ++) {
-                LevelChunk levelChunk = chunkSource.getChunkNow(chunkX, chunkZ);
-                if (levelChunk == null) {
-                    continue;
-                }
-
+        for (ChunkPos chunkPos : chunkPositions) {
+            LevelChunk levelChunk = serverLevel.getChunkSource().getChunkNow(chunkPos.x, chunkPos.z);
+            if (levelChunk != null) {
                 for (BlockEntity blockEntity : levelChunk.getBlockEntities().values()) {
-                    if (!(blockEntity instanceof NetherChestBlockEntity)) {
-                        continue;
-                    }
-
-                    double distance = blockEntity.getBlockPos().distToCenterSqr(mobPosition);
-                    if (distance >= nearestDistance) {
-                        continue;
-                    }
-
-                    TransportItemsBetweenContainers.TransportItemTarget target = this.isTargetValidToPick(pathfinderMob,
-                            serverLevel,
-                            blockEntity,
-                            visitedPositions,
-                            unreachablePositions,
-                            searchArea);
-                    if (target != null) {
-                        nearestTarget = target;
-                        nearestDistance = distance;
+                    if (blockEntity instanceof ChestBlockEntity || blockEntity instanceof NetherChestBlockEntity) {
+                        double distance = blockEntity.getBlockPos().distToCenterSqr(pathfinderMob.position());
+                        if (distance < nearestDistance) {
+                            TransportItemsBetweenContainers.TransportItemTarget target = this.isTargetValidToPick(
+                                    pathfinderMob,
+                                    serverLevel,
+                                    blockEntity,
+                                    visitedPositions,
+                                    unreachablePositions,
+                                    searchArea);
+                            if (target != null) {
+                                nearestTarget = target;
+                                nearestDistance = distance;
+                            }
+                        }
                     }
                 }
             }
         }
 
-        return nearestTarget;
+        return Optional.ofNullable(nearestTarget);
     }
 
     /**
