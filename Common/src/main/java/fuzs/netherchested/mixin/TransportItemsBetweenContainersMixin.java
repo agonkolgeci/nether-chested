@@ -83,9 +83,14 @@ abstract class TransportItemsBetweenContainersMixin {
      * Replaces the vanilla target search with a copy of it that additionally accepts nether chests, so that every
      * check a nether chest has to pass is the very check a vanilla chest has to pass.
      * <p>
-     * The one deliberate departure from vanilla: a nether chest wins over a vanilla chest no matter which one is
-     * closer, as the nether chest is meant to be the actual storage a copper golem feeds. Distance only decides
-     * between chests of the same kind, exactly like vanilla does.
+     * Two deliberate departures from vanilla: a chest that cannot take the carried item in the first place is not a
+     * candidate at all, instead of being walked up to only to be given up on again, and a nether chest wins over a
+     * vanilla chest no matter which one is closer, as the nether chest is meant to be the actual storage a copper
+     * golem feeds. Distance only decides between chests of the same kind, exactly like vanilla does.
+     * <p>
+     * Both are needed together: without the first one every nether chest in range outranks the vanilla chest that is
+     * the only one able to take the item, and the mob burns a visited position on each of them until the tenth one
+     * sends it into its idle cooldown, which clears the visited positions and starts the very same round over again.
      * <p>
      * This only ever runs for a mob that already carries an item and whose behavior accepts vanilla chests as a
      * drop-off target, leaving the vanilla search untouched for everyone else.
@@ -127,7 +132,7 @@ abstract class TransportItemsBetweenContainersMixin {
                                     visitedPositions,
                                     unreachablePositions,
                                     searchArea);
-                            if (target != null) {
+                            if (target != null && canPlaceCarriedItem(pathfinderMob, target.container())) {
                                 if (isNetherChest) {
                                     nearestNetherChestTarget = target;
                                     nearestNetherChestDistance = distance;
@@ -143,6 +148,26 @@ abstract class TransportItemsBetweenContainersMixin {
         }
 
         return Optional.ofNullable(nearestNetherChestTarget != null ? nearestNetherChestTarget : nearestTarget);
+    }
+
+    /**
+     * A copy of the behavior's own {@code matchesLeavingItemsRequirement}, which vanilla only runs once the mob has
+     * reached the chest, run while the target is being picked instead.
+     */
+    @Unique
+    private static boolean canPlaceCarriedItem(PathfinderMob pathfinderMob, Container container) {
+        if (container.isEmpty()) {
+            return true;
+        } else {
+            ItemStack carriedItemStack = pathfinderMob.getMainHandItem();
+            for (ItemStack itemStack : container) {
+                if (ItemStack.isSameItem(itemStack, carriedItemStack)) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
     }
 
     /**
